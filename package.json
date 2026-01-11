@@ -1,0 +1,37 @@
+{
+  "name": "contact-relay",
+  "version": "1.0.0",
+  "description": "Serverless contact form to Telegram relay on Cloudflare Workers",
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/investblog/contact-relay"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "telegram",
+    "contact-form",
+    "serverless",
+    "hono"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "setup": "npx tsx scripts/setup.ts"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "@types/node": "^22.0.0",
+    "@types/prompts": "^2.4.9",
+    "prompts": "^2.4.2",
+    "execa": "^9.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.93.0"
+  }
+}
