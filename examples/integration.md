@@ -5,6 +5,7 @@
 1. Deploy the worker: `npm run setup && npm run deploy`
 2. Add your domain to allowed origins (see below)
 3. Add the form and script to your website
+4. (Optional) Configure Cloudflare Turnstile for captcha protection
 
 ## Configure Allowed Origins
 
@@ -32,6 +33,9 @@ Wildcard patterns:
 ## HTML Form Example
 
 ```html
+<!-- Turnstile script (load once, before form) -->
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+
 <form id="ContactForm">
   <input type="text" id="contact_name" placeholder="Name" required>
   <input type="email" id="contact_email" placeholder="Email">
@@ -40,6 +44,12 @@ Wildcard patterns:
 
   <!-- Honeypot field (hidden, leave empty) -->
   <input type="text" name="website" style="display:none" tabindex="-1" autocomplete="off">
+
+  <!-- Turnstile captcha widget (optional) -->
+  <div id="turnstile-container"></div>
+
+  <!-- Error message display -->
+  <div id="form-error" style="color: #dc3545; display: none;"></div>
 
   <button type="submit" id="submitBtn">Send</button>
 </form>
@@ -50,37 +60,152 @@ Wildcard patterns:
 ```html
 <script>
 document.addEventListener("DOMContentLoaded", () => {
-  const WORKER_URL = "https://YOUR_WORKER.workers.dev"; // <-- Replace with your worker URL
+  // ============ CONFIGURATION ============
+  const CONFIG = {
+    // Worker URL (required)
+    workerUrl: "https://YOUR_WORKER.workers.dev",
+
+    // Turnstile settings (optional - leave siteKey empty to disable)
+    turnstile: {
+      siteKey: "",                // Your Turnstile site key (leave empty to disable captcha)
+      theme: "auto",              // "light" | "dark" | "auto"
+      mode: "managed",            // "managed" | "invisible" | "non-interactive"
+      size: "normal",             // "normal" | "compact"
+    },
+
+    // UI text
+    messages: {
+      sending: "Sending...",
+      success: "✔ Sent",
+      error: "Error",
+      failed: "Failed",
+      defaultBtn: "Send",
+      resetDelay: 3000,           // ms before button resets
+    },
+
+    // Error messages
+    errors: {
+      origin_not_allowed: "This domain is not authorized",
+      rate_limited: "Too many requests. Please wait a moment",
+      too_fast: "Please wait before submitting",
+      empty_payload: "Please fill in the required fields",
+      captcha_failed: "Captcha verification failed. Please try again",
+      telegram_send_failed: "Failed to send message. Please try again",
+      routing_not_configured: "Service configuration error",
+      network_error: "Connection error. Check your internet",
+      bot_detected: "Submission blocked",
+    }
+  };
+  // ========================================
 
   const form = document.getElementById("ContactForm");
   const submitBtn = document.getElementById("submitBtn");
+  const errorDiv = document.getElementById("form-error");
+  const turnstileContainer = document.getElementById("turnstile-container");
   const formLoadTime = Date.now();
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
+  let turnstileWidgetId = null;
 
-    // Simple antibot check
-    const isHuman = () => {
-      return (
-        !navigator.webdriver &&
-        typeof window.PointerEvent !== "undefined" &&
-        typeof navigator.language === "string" &&
-        typeof navigator.userAgent === "string"
-      );
+  // Initialize Turnstile if configured
+  function initTurnstile() {
+    if (!CONFIG.turnstile.siteKey || !window.turnstile) return;
+
+    const renderOptions = {
+      sitekey: CONFIG.turnstile.siteKey,
+      theme: CONFIG.turnstile.theme,
+      size: CONFIG.turnstile.size,
+      callback: () => hideError(),
+      "error-callback": () => showError(CONFIG.errors.captcha_failed),
     };
 
+    // For invisible mode, add execution option
+    if (CONFIG.turnstile.mode === "invisible") {
+      renderOptions.execution = "execute";
+    }
+
+    turnstileWidgetId = turnstile.render(turnstileContainer, renderOptions);
+  }
+
+  // Show error message
+  function showError(message) {
+    errorDiv.textContent = message;
+    errorDiv.style.display = "block";
+  }
+
+  // Hide error message
+  function hideError() {
+    errorDiv.style.display = "none";
+  }
+
+  // Get error message from response
+  function getErrorMessage(errorCode) {
+    return CONFIG.errors[errorCode] || `Error: ${errorCode}`;
+  }
+
+  // Reset button after delay
+  function resetButton() {
+    setTimeout(() => {
+      submitBtn.textContent = CONFIG.messages.defaultBtn;
+    }, CONFIG.messages.resetDelay);
+  }
+
+  // Simple antibot check
+  function isHuman() {
+    return (
+      !navigator.webdriver &&
+      typeof window.PointerEvent !== "undefined" &&
+      typeof navigator.language === "string" &&
+      typeof navigator.userAgent === "string"
+    );
+  }
+
+  // Get Turnstile token
+  async function getTurnstileToken() {
+    if (!CONFIG.turnstile.siteKey || !window.turnstile) return "";
+
+    // For invisible mode, trigger execution
+    if (CONFIG.turnstile.mode === "invisible" && turnstileWidgetId !== null) {
+      turnstile.execute(turnstileContainer);
+      // Wait for token
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    return turnstile.getResponse(turnstileWidgetId) || "";
+  }
+
+  // Reset Turnstile widget
+  function resetTurnstile() {
+    if (turnstileWidgetId !== null && window.turnstile) {
+      turnstile.reset(turnstileWidgetId);
+    }
+  }
+
+  // Form submit handler
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    hideError();
+
+    // Antibot check
     if (!isHuman()) {
-      console.warn("Bot detected");
+      showError(CONFIG.errors.bot_detected);
       return;
     }
 
+    // Collect form data
     const name = document.getElementById("contact_name")?.value?.trim() || "";
     const email = document.getElementById("contact_email")?.value?.trim() || "";
     const telegram = document.getElementById("contact_telegram")?.value?.trim() || "";
     const message = document.getElementById("contact_message")?.value?.trim() || "";
-
-    // Honeypot field
     const website = form.querySelector('[name="website"]')?.value || "";
+
+    // Get captcha token
+    const turnstileToken = await getTurnstileToken();
+
+    // Check if captcha is required but not completed
+    if (CONFIG.turnstile.siteKey && !turnstileToken && CONFIG.turnstile.mode !== "invisible") {
+      showError("Please complete the captcha");
+      return;
+    }
 
     const payload = {
       name,
@@ -88,14 +213,15 @@ document.addEventListener("DOMContentLoaded", () => {
       telegram,
       message,
       website,
-      ts: formLoadTime // Timestamp for time-to-submit check
+      ts: formLoadTime,
+      cf_turnstile_response: turnstileToken,
     };
 
     try {
       submitBtn.disabled = true;
-      submitBtn.textContent = "Sending...";
+      submitBtn.textContent = CONFIG.messages.sending;
 
-      const response = await fetch(`${WORKER_URL}/send`, {
+      const response = await fetch(`${CONFIG.workerUrl}/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -105,24 +231,60 @@ document.addEventListener("DOMContentLoaded", () => {
 
       if (response.ok && result.status === "ok") {
         form.reset();
-        submitBtn.textContent = "✔ Sent";
-        setTimeout(() => { submitBtn.textContent = "Send"; }, 3000);
+        resetTurnstile();
+        submitBtn.textContent = CONFIG.messages.success;
+        resetButton();
       } else {
-        console.error("Error:", result.error);
-        submitBtn.textContent = "Error";
-        setTimeout(() => { submitBtn.textContent = "Send"; }, 3000);
+        showError(getErrorMessage(result.error));
+        resetTurnstile();
+        submitBtn.textContent = CONFIG.messages.error;
+        resetButton();
       }
     } catch (err) {
       console.error("Send error:", err);
-      submitBtn.textContent = "Failed";
-      setTimeout(() => { submitBtn.textContent = "Send"; }, 3000);
+      showError(CONFIG.errors.network_error);
+      submitBtn.textContent = CONFIG.messages.failed;
+      resetButton();
     } finally {
       submitBtn.disabled = false;
     }
   });
+
+  // Initialize Turnstile when script loads
+  if (CONFIG.turnstile.siteKey) {
+    if (window.turnstile) {
+      initTurnstile();
+    } else {
+      // Wait for Turnstile script to load
+      const checkTurnstile = setInterval(() => {
+        if (window.turnstile) {
+          clearInterval(checkTurnstile);
+          initTurnstile();
+        }
+      }, 100);
+    }
+  }
 });
 </script>
 ```
+
+## Configuration Options
+
+### Turnstile Modes
+
+| Mode | Description |
+|------|-------------|
+| `managed` | User clicks checkbox (default, most reliable) |
+| `invisible` | Auto-triggers on form submit, no visible widget |
+| `non-interactive` | Shows loading spinner, auto-solves without user action |
+
+### Turnstile Themes
+
+| Theme | Description |
+|-------|-------------|
+| `light` | Light background |
+| `dark` | Dark background |
+| `auto` | Matches user's system preference |
 
 ## Spam Protection Features
 
@@ -136,35 +298,19 @@ The form includes several anti-spam measures:
 | **Rate limiting** | Server-side — 30 requests/min per IP |
 | **Idempotency** | Prevents duplicate submissions within 5 minutes |
 
-## Optional: Cloudflare Turnstile
-
-For stronger protection, enable Turnstile captcha:
+## Enabling Cloudflare Turnstile
 
 1. Get Turnstile keys from [Cloudflare Dashboard](https://dash.cloudflare.com/?to=/:account/turnstile)
-2. Set `ENABLE_TURNSTILE=true` and `TURNSTILE_SECRET` during setup
-3. Add Turnstile widget to your form:
-
-```html
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-
-<form id="ContactForm">
-  <!-- ... form fields ... -->
-
-  <div class="cf-turnstile" data-sitekey="YOUR_SITE_KEY"></div>
-
-  <button type="submit" id="submitBtn">Send</button>
-</form>
-```
-
-4. Include the token in your payload:
+2. During worker setup, set `ENABLE_TURNSTILE=true` and provide `TURNSTILE_SECRET`
+3. In the JavaScript CONFIG, set your `siteKey`:
 
 ```javascript
-const turnstileToken = document.querySelector('[name="cf-turnstile-response"]')?.value || "";
-
-const payload = {
-  // ... other fields
-  cf_turnstile_response: turnstileToken
-};
+turnstile: {
+  siteKey: "0x4AAAAAAA...",  // Your site key from Cloudflare
+  theme: "auto",
+  mode: "managed",
+  size: "normal",
+}
 ```
 
 ## Error Codes
