@@ -313,6 +313,22 @@ turnstile: {
 }
 ```
 
+### Important: Turnstile Limits
+
+| Plan | Limit |
+|------|-------|
+| Free | 1 million challenges/month |
+| Enterprise | Unlimited |
+
+**Multi-domain considerations:**
+- Each domain requires its own Turnstile widget (site key)
+- All domains share the same monthly limit per Cloudflare account
+- One secret key can verify tokens from multiple site keys
+- For high-traffic multi-tenant setups, consider:
+  - Disabling captcha (`siteKey: ""`) and relying on other spam protection
+  - Using Turnstile only for high-risk domains
+  - Upgrading to Enterprise plan
+
 ## Error Codes
 
 | Error | Meaning |
