@@ -101,23 +101,17 @@ async function main() {
   console.log("\n  Updating wrangler.toml...");
   updateWranglerToml(kvIds);
 
-  // Set secrets
+  // Set secrets — always create the full set so the Worker environment is complete
   console.log("\n  Setting secrets...");
   setSecret(wrangler, "BOT_TOKEN", config.botToken);
   setSecret(wrangler, "TG_DEFAULT_CHAT_ID", config.chatId);
   setSecret(wrangler, "ALLOWED_ORIGINS", config.allowedOrigins);
+  setSecret(wrangler, "ROUTING_JSON", config.routingJson || "");
+  setSecret(wrangler, "ADMIN_KEY", config.adminKey);
+  setSecret(wrangler, "TURNSTILE_SECRET", config.turnstileSecret || "");
 
-  if (config.routingJson) {
-    setSecret(wrangler, "ROUTING_JSON", config.routingJson);
-  }
-
-  if (config.enableTurnstile && config.turnstileSecret) {
-    setSecret(wrangler, "TURNSTILE_SECRET", config.turnstileSecret);
+  if (config.enableTurnstile) {
     updateWranglerVar("ENABLE_TURNSTILE", "true");
-  }
-
-  if (config.adminKey) {
-    setSecret(wrangler, "ADMIN_KEY", config.adminKey);
   }
 
   console.log("\n  Setup complete!\n");

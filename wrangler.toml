@@ -2,7 +2,19 @@ name = "contact-relay"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# KV namespaces are configured by: npm run setup
+# KV namespaces — real IDs are set by: npm run setup
+# Local dev uses Miniflare with any placeholder IDs
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "local-rate-limit"
+
+[[kv_namespaces]]
+binding = "IDEMPOTENCY"
+id = "local-idempotency"
+
+[[kv_namespaces]]
+binding = "CONFIG"
+id = "local-config"
 
 [vars]
 RATE_LIMIT_PER_MIN = "30"
