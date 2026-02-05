@@ -1,9 +1,11 @@
 import prompts from "prompts";
-import { execa, ExecaError } from "execa";
+import { execFileSync, execSync } from "child_process";
 import { readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
-const WRANGLER_TOML_PATH = join(process.cwd(), "wrangler.toml");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const WRANGLER_TOML_PATH = join(__dirname, "..", "wrangler.toml");
 
 interface SetupConfig {
   botToken: string;
@@ -15,72 +17,113 @@ interface SetupConfig {
   adminKey: string;
 }
 
-async function main() {
-  console.log("\n🚀 Casinobot CF Worker Setup\n");
-
-  // Check wrangler is available
+function run(cmd: string, args: string[], input?: string): string {
   try {
-    await execa("wrangler", ["--version"]);
-  } catch {
-    console.error("❌ wrangler CLI not found. Install with: npm install -g wrangler");
-    process.exit(1);
+    const opts: { encoding: BufferEncoding; input?: string; cwd: string } = {
+      encoding: "utf-8",
+      cwd: join(__dirname, ".."),
+    };
+    if (input !== undefined) opts.input = input;
+    return execFileSync(cmd, args, opts).trim();
+  } catch (e: any) {
+    const msg = e.stderr?.toString().trim() || e.message;
+    throw new Error(msg);
   }
+}
+
+function runShell(cmd: string): string {
+  return execSync(cmd, {
+    encoding: "utf-8",
+    cwd: join(__dirname, ".."),
+  }).trim();
+}
+
+function wranglerBin(): string {
+  const local = join(__dirname, "..", "node_modules", ".bin", "wrangler");
+  try {
+    execFileSync(local, ["--version"], { encoding: "utf-8" });
+    return local;
+  } catch {
+    // fall back to global
+  }
+  try {
+    execFileSync("wrangler", ["--version"], { encoding: "utf-8" });
+    return "wrangler";
+  } catch {
+    // not found
+  }
+  console.error("wrangler CLI not found. Run: npm install");
+  process.exit(1);
+}
+
+async function main() {
+  console.log("\nContact-Relay Setup\n");
+
+  const wrangler = wranglerBin();
 
   // Check if logged in
   try {
-    await execa("wrangler", ["whoami"]);
+    const who = run(wrangler, ["whoami"]);
+    console.log(`  Logged in: ${who.split("\n").pop()}\n`);
   } catch {
-    console.log("📝 You need to login to Cloudflare first...\n");
-    await execa("wrangler", ["login"], { stdio: "inherit" });
+    console.log("  You need to login to Cloudflare first...\n");
+    execSync(`"${wrangler}" login`, { stdio: "inherit" });
+    // Verify login succeeded
+    try {
+      run(wrangler, ["whoami"]);
+    } catch {
+      console.error("  Login failed. Run: wrangler login");
+      process.exit(1);
+    }
   }
 
   // Collect configuration
   const config = await collectConfig();
-
   if (!config) {
-    console.log("\n❌ Setup cancelled.");
+    console.log("\n  Setup cancelled.");
     process.exit(0);
   }
 
-  // Create KV namespaces
-  console.log("\n📦 Creating KV namespaces...");
-  const rateLimitId = await createKvNamespace("RATE_LIMIT");
-  const idempotencyId = await createKvNamespace("IDEMPOTENCY");
-  const configId = await createKvNamespace("CONFIG");
+  // Create or find KV namespaces
+  console.log("\n  Creating KV namespaces...");
+  const kvIds = await ensureKvNamespaces(wrangler, [
+    "RATE_LIMIT",
+    "IDEMPOTENCY",
+    "CONFIG",
+  ]);
 
-  if (!rateLimitId || !idempotencyId || !configId) {
-    console.error("❌ Failed to create KV namespaces");
+  if (!kvIds) {
+    console.error("  Failed to create KV namespaces");
     process.exit(1);
   }
 
   // Update wrangler.toml
-  console.log("\n📝 Updating wrangler.toml...");
-  updateWranglerToml(rateLimitId, idempotencyId, configId);
+  console.log("\n  Updating wrangler.toml...");
+  updateWranglerToml(kvIds);
 
   // Set secrets
-  console.log("\n🔐 Setting secrets...");
-  await setSecret("BOT_TOKEN", config.botToken);
-  await setSecret("TG_DEFAULT_CHAT_ID", config.chatId);
-  await setSecret("ALLOWED_ORIGINS", config.allowedOrigins);
+  console.log("\n  Setting secrets...");
+  setSecret(wrangler, "BOT_TOKEN", config.botToken);
+  setSecret(wrangler, "TG_DEFAULT_CHAT_ID", config.chatId);
+  setSecret(wrangler, "ALLOWED_ORIGINS", config.allowedOrigins);
 
   if (config.routingJson) {
-    await setSecret("ROUTING_JSON", config.routingJson);
+    setSecret(wrangler, "ROUTING_JSON", config.routingJson);
   }
 
   if (config.enableTurnstile && config.turnstileSecret) {
-    await setSecret("TURNSTILE_SECRET", config.turnstileSecret);
-    await updateWranglerVar("ENABLE_TURNSTILE", "true");
+    setSecret(wrangler, "TURNSTILE_SECRET", config.turnstileSecret);
+    updateWranglerVar("ENABLE_TURNSTILE", "true");
   }
 
   if (config.adminKey) {
-    await setSecret("ADMIN_KEY", config.adminKey);
+    setSecret(wrangler, "ADMIN_KEY", config.adminKey);
   }
 
-  console.log("\n✅ Setup complete!");
-  console.log("\nNext steps:");
-  console.log("  1. npm install");
-  console.log("  2. npm run dev     # Local development");
-  console.log("  3. npm run deploy  # Deploy to Cloudflare\n");
+  console.log("\n  Setup complete!\n");
+  console.log("  Next steps:");
+  console.log("    npm run dev     # Local development");
+  console.log("    npm run deploy  # Deploy to Cloudflare\n");
 }
 
 async function collectConfig(): Promise<SetupConfig | null> {
@@ -101,7 +144,8 @@ async function collectConfig(): Promise<SetupConfig | null> {
       {
         type: "text",
         name: "allowedOrigins",
-        message: "Allowed Origins (comma-separated, e.g. *.example.com, site.org):",
+        message:
+          "Allowed Origins (comma-separated, e.g. *.example.com, site.org):",
         initial: "*",
       },
       {
@@ -113,7 +157,8 @@ async function collectConfig(): Promise<SetupConfig | null> {
       {
         type: (prev) => (prev ? "text" : null),
         name: "routingJson",
-        message: 'Routing JSON (e.g. {"example.com": {"chat_id": "123", "bot_token": "..."}}):',
+        message:
+          'Routing JSON (e.g. {"example.com": {"chat_id": "123", "bot_token": "..."}}):',
         validate: (v) => {
           try {
             JSON.parse(v);
@@ -138,7 +183,8 @@ async function collectConfig(): Promise<SetupConfig | null> {
         type: "password",
         name: "adminKey",
         message: "Admin API Key (for /admin/* endpoints):",
-        validate: (v) => (v.length >= 16 ? true : "Min 16 characters for security"),
+        validate: (v) =>
+          v.length >= 16 ? true : "Min 16 characters for security",
       },
     ],
     {
@@ -163,76 +209,170 @@ async function collectConfig(): Promise<SetupConfig | null> {
   };
 }
 
-async function createKvNamespace(name: string): Promise<string | null> {
-  try {
-    const result = await execa("wrangler", ["kv:namespace", "create", name]);
-    const match = result.stdout.match(/id\s*=\s*"([^"]+)"/);
-    if (match) {
-      console.log(`  ✓ ${name} created (id: ${match[1]})`);
-      return match[1];
-    }
-  } catch (e) {
-    const error = e as ExecaError;
-    // Namespace might already exist
-    if (error.stderr?.includes("already exists")) {
-      // Try to get existing namespace ID
-      const listResult = await execa("wrangler", ["kv:namespace", "list"]);
-      const namespaces = JSON.parse(listResult.stdout);
-      const existing = namespaces.find((ns: { title: string }) =>
-        ns.title.includes(name)
-      );
-      if (existing) {
-        console.log(`  ✓ ${name} already exists (id: ${existing.id})`);
-        return existing.id;
-      }
-    }
-    console.error(`  ❌ Failed to create ${name}:`, error.stderr || error.message);
-  }
-  return null;
+interface KvNamespace {
+  id: string;
+  title: string;
 }
 
-function updateWranglerToml(rateLimitId: string, idempotencyId: string, configId: string) {
+function listKvNamespaces(wrangler: string): KvNamespace[] {
+  try {
+    const out = run(wrangler, ["kv", "namespace", "list"]);
+    const parsed = JSON.parse(out);
+    if (Array.isArray(parsed)) return parsed;
+  } catch {
+    // ignore parse errors
+  }
+  return [];
+}
+
+async function ensureKvNamespaces(
+  wrangler: string,
+  bindings: string[]
+): Promise<Record<string, string> | null> {
+  // Load existing namespaces first
+  let existing = listKvNamespaces(wrangler);
+  const result: Record<string, string> = {};
+
+  for (const binding of bindings) {
+    const title = `contact-relay-${binding}`;
+
+    // Check if already exists
+    const found = existing.find((ns) => ns.title === title);
+    if (found) {
+      console.log(`    ${binding} already exists (${found.id})`);
+      result[binding] = found.id;
+      continue;
+    }
+
+    // Create new namespace
+    try {
+      const out = run(wrangler, ["kv", "namespace", "create", binding]);
+      // Try to extract ID from output — format varies across wrangler versions:
+      //   id = "abc123..."   (older)
+      //   id: "abc123..."    (newer)
+      //   { id: "abc123..." }
+      const match = out.match(/id\s*[:=]\s*"?([a-f0-9]{32})"?/);
+      if (match) {
+        console.log(`    ${binding} created (${match[1]})`);
+        result[binding] = match[1];
+        continue;
+      }
+
+      // Regex didn't match — re-list to find it
+      existing = listKvNamespaces(wrangler);
+      const retry = existing.find((ns) => ns.title === title);
+      if (retry) {
+        console.log(`    ${binding} created (${retry.id})`);
+        result[binding] = retry.id;
+        continue;
+      }
+
+      console.error(`    Failed to find ID for ${binding} after creation`);
+      return null;
+    } catch (e: any) {
+      // If "already exists", re-list
+      if (e.message?.includes("already exists")) {
+        existing = listKvNamespaces(wrangler);
+        const retry = existing.find((ns) => ns.title === title);
+        if (retry) {
+          console.log(`    ${binding} already exists (${retry.id})`);
+          result[binding] = retry.id;
+          continue;
+        }
+      }
+      console.error(`    Failed to create ${binding}: ${e.message}`);
+      return null;
+    }
+  }
+
+  return result;
+}
+
+function updateWranglerToml(kvIds: Record<string, string>) {
   let content = readFileSync(WRANGLER_TOML_PATH, "utf-8");
 
-  // Remove commented KV sections and add real ones
-  content = content.replace(/# \[\[kv_namespaces\]\][\s\S]*?# id = ""/g, "");
+  // Remove any existing KV namespace blocks (commented or not)
+  // Remove lines: # [[kv_namespaces]], # binding = "...", # id = "..."
+  // and uncommented [[kv_namespaces]] blocks
+  const lines = content.split("\n");
+  const cleaned: string[] = [];
+  let inKvBlock = false;
 
-  // Add KV namespaces at the end
-  const kvConfig = `
-[[kv_namespaces]]
-binding = "RATE_LIMIT"
-id = "${rateLimitId}"
+  for (const line of lines) {
+    const trimmed = line.replace(/^#\s?/, "").trim();
 
-[[kv_namespaces]]
-binding = "IDEMPOTENCY"
-id = "${idempotencyId}"
+    if (trimmed === "[[kv_namespaces]]") {
+      inKvBlock = true;
+      continue;
+    }
 
-[[kv_namespaces]]
-binding = "CONFIG"
-id = "${configId}"
-`;
+    if (inKvBlock) {
+      // KV block lines: binding = "..." and id = "..."
+      if (
+        trimmed.startsWith("binding") ||
+        trimmed.startsWith("id") ||
+        trimmed === ""
+      ) {
+        continue;
+      }
+      inKvBlock = false;
+    }
 
-  content = content.trimEnd() + "\n" + kvConfig;
-  writeFileSync(WRANGLER_TOML_PATH, content);
-  console.log("  ✓ wrangler.toml updated");
+    cleaned.push(line);
+  }
+
+  // Remove the comment line about KV setup if present
+  const filtered = cleaned.filter(
+    (l) => !l.includes("KV Namespaces") || !l.startsWith("#")
+  );
+
+  // Build KV config
+  const kvLines: string[] = [""];
+  for (const [binding, id] of Object.entries(kvIds)) {
+    kvLines.push("[[kv_namespaces]]");
+    kvLines.push(`binding = "${binding}"`);
+    kvLines.push(`id = "${id}"`);
+    kvLines.push("");
+  }
+
+  const final = filtered.join("\n").trimEnd() + "\n" + kvLines.join("\n");
+  writeFileSync(WRANGLER_TOML_PATH, final);
+  console.log("    wrangler.toml updated");
 }
 
-async function setSecret(name: string, value: string) {
+function setSecret(wrangler: string, name: string, value: string) {
   try {
-    await execa("wrangler", ["secret", "put", name], {
+    // Use execFileSync with input option — more reliable than execa stdin piping
+    execFileSync(wrangler, ["secret", "put", name], {
       input: value,
+      encoding: "utf-8",
+      cwd: join(__dirname, ".."),
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    console.log(`  ✓ ${name} saved`);
-  } catch (e) {
-    const error = e as ExecaError;
-    console.error(`  ❌ Failed to set ${name}:`, error.stderr || error.message);
+    console.log(`    ${name} saved`);
+  } catch (e: any) {
+    const stderr = e.stderr?.toString().trim() || "";
+    // wrangler secret put exits non-zero but still saves the secret sometimes
+    if (stderr.includes("Success")) {
+      console.log(`    ${name} saved`);
+      return;
+    }
+    console.error(`    Failed to set ${name}: ${stderr || e.message}`);
   }
 }
 
-async function updateWranglerVar(name: string, value: string) {
+function updateWranglerVar(name: string, value: string) {
   let content = readFileSync(WRANGLER_TOML_PATH, "utf-8");
   const regex = new RegExp(`${name}\\s*=\\s*"[^"]*"`);
-  content = content.replace(regex, `${name} = "${value}"`);
+  if (regex.test(content)) {
+    content = content.replace(regex, `${name} = "${value}"`);
+  } else {
+    // Append to [vars] section
+    content = content.replace(
+      /\[vars\]/,
+      `[vars]\n${name} = "${value}"`
+    );
+  }
   writeFileSync(WRANGLER_TOML_PATH, content);
 }
 
