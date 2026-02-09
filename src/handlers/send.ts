@@ -93,7 +93,7 @@ export async function sendHandler(
   }
 
   // 9. Route to correct bot/chat
-  const { token, chatId } = getRouting(host, env);
+  const { token, chatId } = await getRouting(host, env);
 
   if (!token || !chatId) {
     return jsonError(c, "routing_not_configured", 500);
@@ -110,6 +110,17 @@ export async function sendHandler(
     );
   }
 
+  // Cache migrated supergroup chat ID for future requests
+  if (result.migrated_chat_id) {
+    c.executionCtx.waitUntil(
+      env.CONFIG.put(
+        `migrated_chat:${chatId}`,
+        result.migrated_chat_id,
+        { expirationTtl: 60 * 60 * 24 * 365 }
+      )
+    );
+  }
+
   return c.json<ApiResponse>({ status: "ok", request_id: idempotencyKey }, 200);
 }
 
@@ -121,10 +132,10 @@ function jsonError(
   return c.json<ApiResponse>({ status: "error", error }, status);
 }
 
-function getRouting(
+async function getRouting(
   host: string,
   env: Env
-): { token: string; chatId: string } {
+): Promise<{ token: string; chatId: string }> {
   let routing: RoutingMap = {};
 
   if (env.ROUTING_JSON) {
@@ -136,9 +147,19 @@ function getRouting(
   }
 
   const route = routing[host] || {};
+  let chatId = route.chat_id || env.TG_DEFAULT_CHAT_ID;
+
+  // Check if this chat was migrated to a supergroup
+  try {
+    const migrated = await env.CONFIG.get(`migrated_chat:${chatId}`);
+    if (migrated) chatId = migrated;
+  } catch {
+    // Ignore KV errors
+  }
+
   return {
     token: route.bot_token || env.BOT_TOKEN,
-    chatId: route.chat_id || env.TG_DEFAULT_CHAT_ID,
+    chatId,
   };
 }
 
