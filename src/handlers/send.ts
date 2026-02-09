@@ -17,7 +17,14 @@ export async function sendHandler(
   const allowedOrigins = await getAllowedOrigins(env.CONFIG, env.ALLOWED_ORIGINS);
 
   if (!matchOrigin(host, allowedOrigins)) {
-    return jsonError(c, "origin_not_allowed", 403);
+    return c.json<ApiResponse>(
+      {
+        status: "error",
+        error: "origin_not_allowed",
+        detail: `host "${host}" does not match allowed patterns`,
+      },
+      403
+    );
   }
 
   // 2. Rate limiting

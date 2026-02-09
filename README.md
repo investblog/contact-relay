@@ -119,11 +119,76 @@ Route different domains to different Telegram chats:
 
 Set via `ROUTING_JSON` secret or during setup.
 
+## Non-interactive Setup
+
+For CI/CD or automated deployments, pass CLI flags to skip interactive prompts:
+
+```bash
+npm run setup -- \
+  --bot-token=123456:ABC-DEF \
+  --chat-id=-1001234567890 \
+  --origins="example.com,*.example.com" \
+  --admin-key=your-secret-admin-key
+```
+
+Optional flags: `--turnstile-secret=...`, `--routing-json='{"site.com":{"chat_id":"..."}}'`
+
+If any required flag is missing, setup falls back to interactive mode.
+
 ## Development
 
 ```bash
 npm run dev    # Start local dev server
 npm run deploy # Deploy to Cloudflare
+```
+
+## Troubleshooting
+
+### `origin_not_allowed`
+
+`ALLOWED_ORIGINS` expects **hostnames**, not full URLs. The worker auto-strips protocols, but double-check your config:
+
+```
+301.st              ← correct
+*.example.com       ← correct
+https://301.st      ← also works (auto-converted)
+```
+
+The error response includes a `detail` field showing the received host and allowed patterns.
+
+### `telegram_send_failed: group chat was upgraded to a supergroup`
+
+When a Telegram group is upgraded to a supergroup, the chat ID changes. Get the new ID:
+
+```bash
+curl https://api.telegram.org/bot<TOKEN>/getUpdates | grep -o '"id":-[0-9]*'
+```
+
+Look for the `migrate_to_chat_id` field or the new supergroup chat ID (starts with `-100`). Update `TG_DEFAULT_CHAT_ID`:
+
+```bash
+echo "-100NEW_CHAT_ID" | wrangler secret put TG_DEFAULT_CHAT_ID
+```
+
+### Verifying config after deploy
+
+```bash
+curl https://your-worker.workers.dev/health
+```
+
+Returns config diagnostics (no secrets exposed):
+
+```json
+{
+  "ok": true,
+  "config": {
+    "turnstile": true,
+    "bot_configured": true,
+    "origins_count": 3,
+    "rate_limit_per_min": 30,
+    "routing_configured": false
+  }
+}
 ```
 
 ## License

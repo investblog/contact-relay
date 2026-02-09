@@ -17,6 +17,35 @@ interface SetupConfig {
   adminKey: string;
 }
 
+/**
+ * Parse CLI flags: --bot-token=X --chat-id=X --origins=X --admin-key=X
+ * Optional: --turnstile-secret=X --routing-json=X
+ * Returns null if required flags are missing (falls back to interactive).
+ */
+function parseCliFlags(): SetupConfig | null {
+  const flags: Record<string, string> = {};
+  for (const arg of process.argv.slice(2)) {
+    const match = arg.match(/^--([a-z-]+)=(.+)$/);
+    if (match) flags[match[1]] = match[2];
+  }
+
+  const botToken = flags["bot-token"];
+  const chatId = flags["chat-id"];
+  const adminKey = flags["admin-key"];
+
+  if (!botToken || !chatId || !adminKey) return null;
+
+  return {
+    botToken,
+    chatId,
+    allowedOrigins: flags["origins"] || "*",
+    routingJson: flags["routing-json"] || "",
+    enableTurnstile: !!flags["turnstile-secret"],
+    turnstileSecret: flags["turnstile-secret"] || "",
+    adminKey,
+  };
+}
+
 function run(cmd: string, args: string[], input?: string): string {
   try {
     const opts: { encoding: BufferEncoding; input?: string; cwd: string } = {
@@ -77,8 +106,12 @@ async function main() {
     }
   }
 
-  // Collect configuration
-  const config = await collectConfig();
+  // Collect configuration — CLI flags first, fallback to interactive
+  const cliConfig = parseCliFlags();
+  if (cliConfig) {
+    console.log("  Using CLI flags (non-interactive mode)\n");
+  }
+  const config = cliConfig || (await collectConfig());
   if (!config) {
     console.log("\n  Setup cancelled.");
     process.exit(0);

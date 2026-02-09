@@ -38,13 +38,31 @@ export function matchOrigin(host: string, allowedOrigins: string[]): boolean {
 }
 
 /**
+ * Normalize a single origin pattern.
+ * Strips protocol/port if a full URL is provided (common misconfiguration).
+ * "https://301.st" → "301.st", "*.example.com" → "*.example.com"
+ */
+function normalizePattern(pattern: string): string {
+  const trimmed = pattern.trim().toLowerCase();
+  if (trimmed.includes("://")) {
+    try {
+      return new URL(trimmed).hostname;
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed;
+}
+
+/**
  * Parse ALLOWED_ORIGINS env var into array of patterns.
+ * Accepts both hostnames and full URLs — URLs are auto-converted to hostnames.
  */
 export function parseAllowedOrigins(envValue?: string): string[] {
   if (!envValue) return [];
   return envValue
     .split(",")
-    .map((s) => s.trim().toLowerCase())
+    .map(normalizePattern)
     .filter((s) => s.length > 0);
 }
 
