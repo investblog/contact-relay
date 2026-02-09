@@ -9,6 +9,7 @@ Forward contact form submissions from your website directly to Telegram chats �
 - **Zero infrastructure** — runs entirely on Cloudflare Workers (free tier available)
 - **Multi-tenant** — route different domains to different Telegram chats/bots
 - **Spam protection** — honeypot, time-to-submit check, rate limiting, idempotency
+- **Auto supergroup migration** — automatically handles Telegram group → supergroup upgrades
 - **Admin API** — manage allowed origins dynamically via REST API
 - **Turnstile support** — optional Cloudflare captcha integration
 - **TypeScript + Hono** — modern, type-safe codebase
@@ -158,13 +159,15 @@ The error response includes a `detail` field showing the received host and allow
 
 ### `telegram_send_failed: group chat was upgraded to a supergroup`
 
-When a Telegram group is upgraded to a supergroup, the chat ID changes. Get the new ID:
+This is handled **automatically** since v1.1.0. When Telegram returns `migrate_to_chat_id`, the worker retries with the new chat ID and caches it in KV for future requests. No manual intervention needed.
+
+If you still see this error (e.g. KV cache was cleared), get the new ID manually:
 
 ```bash
 curl https://api.telegram.org/bot<TOKEN>/getUpdates | grep -o '"id":-[0-9]*'
 ```
 
-Look for the `migrate_to_chat_id` field or the new supergroup chat ID (starts with `-100`). Update `TG_DEFAULT_CHAT_ID`:
+Look for the supergroup chat ID (starts with `-100`) and update:
 
 ```bash
 echo "-100NEW_CHAT_ID" | wrangler secret put TG_DEFAULT_CHAT_ID
